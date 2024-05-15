@@ -19,7 +19,7 @@ async def aggregate_throughputs(
     Aggregate throughputs for a provider over the past num_days given a model, an input prompt length, max_tokens, and a request method.
     Return the P50 and P90 of the throughputs in a dictionary.
     """
-    throughputs_collection = DatabaseClient.get_collection("throughput")
+    # throughputs_collection = DatabaseClient.get_collection("throughput")
     start = datetime.now() - timedelta(days=num_days)
     query = {
         "start_time": {"$gte": start},
@@ -29,8 +29,8 @@ async def aggregate_throughputs(
         "output_tokens": output_tokens,
     }
     all_throughputs = []
-    async for document in throughputs_collection.find(query):
-        all_throughputs.extend(document.get("tokens_per_second"))
+    # async for document in throughputs_collection.find(query):
+    #     all_throughputs.extend(document.get("tokens_per_second"))
 
     if len(all_throughputs) > 0:
         return {
@@ -49,7 +49,7 @@ async def aggregate_ttft(
     Aggregate TTFT for a provider over the past num_days given a model, an input prompt length, max_tokens, and a request method.
     Return the P50 and P90 of the TTFT in a dictionary.
     """
-    ttft_collection = DatabaseClient.get_collection("ttft")
+    # ttft_collection = DatabaseClient.get_collection("ttft")
     start = datetime.now() - timedelta(days=num_days)
     query = {
         "start_time": {"$gte": start},
@@ -58,8 +58,8 @@ async def aggregate_ttft(
         "concurrent_requests": concurrent_requests,
     }
     all_ttft = []
-    async for document in ttft_collection.find(query):
-        all_ttft.extend(document.get("ttft"))
+    # async for document in ttft_collection.find(query):
+    #     all_ttft.extend(document.get("ttft"))
 
     if len(all_ttft) > 0:
         return {

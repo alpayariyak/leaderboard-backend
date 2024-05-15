@@ -8,11 +8,14 @@ from database.models.metrics import (
     TokenCounts,
     ModelName,
 )
+from tqdm import tqdm
 from utils.types import ModelName
 import time
 import asyncio
 from metrics.aggregate import aggregate_ttft, aggregate_throughputs
 import itertools
+import numpy as np
+import pandas as pd
 
 NUM_WARMUP_REQUESTS = 3
 CONCURRENT_REQUESTS = [50, 20, 2]
@@ -31,17 +34,13 @@ async def validate_and_warmup(provider_name: str, llm_name: ModelName) -> bool:
     warmup_request = 1 if provider_name == "Perplexity" else NUM_WARMUP_REQUESTS
     for _ in range(warmup_request):
         try:
-            await provider.call_sdk(llm_name=llm_name, prompt="Hi", max_tokens=5)
+            await provider.call_streaming(llm_name=llm_name, prompt="Hi", max_tokens=5)
         except Exception as e:
             print(
                 f"***** Caught exception in validate_and_warmup for {provider_name} on {llm_name}: "
                 + str(e)
             )
     return True
-
-
-def get_sleep_time(num_concurrent_requests: int):
-    return 180 if num_concurrent_requests >= 20 else 60
 
 
 async def get_throughputs(
@@ -57,10 +56,7 @@ async def get_throughputs(
     provider = ProviderFactory.get_provider(provider_name)
     if not await validate_and_warmup(provider_name, llm_name):
         return
-    print(
-        f"Getting throughputs for provider={provider_name}, model={llm_name}, concurrent_requests={num_concurrent_requests}, output_tokens={output_tokens}, for {num_repeats} repeats"
-    )
-
+    total = []
     # collect throughputs for num_repeats times
     for _ in range(num_repeats):
         try:
@@ -82,17 +78,15 @@ async def get_throughputs(
                 output_tokens=output_tokens,
                 tokens_per_second=raw_throughputs,
             )
-            await save_throughputs(throughputs)
-            print(
-                f"Saved throughputs for provider = {provider_name}, model = {llm_name},  output tokens = {output_tokens}, concurrent requests = {num_concurrent_requests}"
-            )
+            # await save_throughputs(throughputs)
+            total.extend(raw_throughputs)
+            
         except Exception as e:
             print(
                 f"**** Caught exception in get_throughput for provider={provider_name}, model={llm_name}, output_tokens={output_tokens}, concurrent_requests={num_concurrent_requests}: {str(e)}"
             )
-        sleep_time = get_sleep_time(num_concurrent_requests)
-        await asyncio.sleep(sleep_time)
 
+    return total
 
 async def get_ttft(
     provider_name: str,
@@ -106,10 +100,7 @@ async def get_ttft(
     provider = ProviderFactory.get_provider(provider_name)
     if not await validate_and_warmup(provider_name, llm_name):
         return
-    print(
-        f"Getting TTFT for provider={provider_name}, model={llm_name}, concurrent_requests={num_concurrent_requests}, for {num_repeats} repeats"
-    )
-
+    total = []
     # collect ttft for num_repeats times
     for _ in range(num_repeats):
         try:
@@ -120,7 +111,7 @@ async def get_ttft(
                 for _ in range(num_concurrent_requests)
             ]
             raw_ttfts = await asyncio.gather(*tasks)
-
+            raw_ttfts = [ttft for ttft in raw_ttfts if ttft is not None]
             ttft = TTFT(
                 start_time=start_time,
                 provider_name=provider_name,
@@ -128,33 +119,32 @@ async def get_ttft(
                 concurrent_requests=num_concurrent_requests,
                 ttft=raw_ttfts,
             )
-            await save_ttft(ttft)
-            print(
-                f"Saved TTFT for provider = {provider_name}, model = {llm_name}, concurrent requests = {num_concurrent_requests}"
-            )
+            # await save_ttft(ttft)
+            total.extend(raw_ttfts)
         except Exception as e:
             print(
                 f"***** Caught exception in get_ttft for provider={provider_name}, model={llm_name}, concurrent_requests={num_concurrent_requests}: {str(e)}"
             )
-        sleep_time = get_sleep_time(num_concurrent_requests)
-        await asyncio.sleep(sleep_time)
+    return total
 
 
 async def provider_handler(provider_name: str, model_name: str):
-    ttft_combinations = itertools.product(
+    ttft_combinations = list(itertools.product(
         [provider_name],
         [model_name],
         CONCURRENT_REQUESTS,
-    )
-    throughput_combinations = itertools.product(
+    ))
+    throughput_combinations = list(itertools.product(
         [provider_name],
         [model_name],
         TokenCounts,
         CONCURRENT_REQUESTS,
-    )
-
-    # collect TTFT and Throughput for combinations that hasn't already been collected within a threshold
-    for combo in ttft_combinations:
+    ))
+    results = {}
+    ttft_df_list = []
+    throughput_df_list = []
+    
+    for combo in tqdm(ttft_combinations, desc=f"TTFT {provider_name} {model_name}"):
         provider_name, model, num_concurrent_requests = combo
 
         if (
@@ -165,11 +155,27 @@ async def provider_handler(provider_name: str, model_name: str):
         ):
             continue
         try:
+            # print(combo)
             repeats = max(AVERAGE_OVER // num_concurrent_requests, 1)
-            await get_ttft(*combo, num_repeats=repeats)
+            result = await get_ttft(*combo, num_repeats=repeats)
+            results[num_concurrent_requests] = result
+            # print(result + "\n\n")
         except:
             pass
-    for combo in throughput_combinations:
+    
+    print("Concurrent Requests, P90 TTFT, P50 TTFT")
+    for num_concurrent_requests, ttft_results in results.items():
+        p90_ttft = np.percentile(ttft_results, 90)
+        p50_ttft = np.percentile(ttft_results, 50)
+        print(f"{num_concurrent_requests}, {p90_ttft}, {p50_ttft}")
+        ttft_df_list.append({"Concurrent Requests": num_concurrent_requests, "P90 TTFT": p90_ttft, "P50 TTFT": p50_ttft})
+    
+    asyncio.sleep(10) 
+    # # pd.DataFrame(ttft_df_list).to_csv("ttft.csv")
+
+        
+    results = {}
+    for combo in tqdm(throughput_combinations, desc=f"Throughput {provider_name} {model_name}"):
         provider_name, model, output_tokens, num_concurrent_requests = combo
         if (
             model
@@ -184,19 +190,32 @@ async def provider_handler(provider_name: str, model_name: str):
             continue
         try:
             repeats = max(AVERAGE_OVER // num_concurrent_requests, 1)
-            await get_throughputs(*combo, num_repeats=repeats)
+            result = await get_throughputs(*combo, num_repeats=repeats)
+            results[f"{output_tokens}_{num_concurrent_requests}"] = result
+            print(result)
         except:
             pass
+    print("Output Tokens, Concurrent Requests, P90 Throughput, P50 Throughput")
+    for key, throughput_results in results.items():
+        throughput_results = [throughput for throughput in throughput_results if throughput is not None]
+        p90_throughput = np.percentile(throughput_results, 90)
+        p50_throughput = np.percentile(throughput_results, 50)
+        output_tokens, num_concurrent_requests = key.split("_")
+        print(f"{output_tokens}, {num_concurrent_requests}, {p90_throughput}, {p50_throughput}")
+        throughput_df_list.append({"Output Tokens": output_tokens, "Concurrent Requests": num_concurrent_requests, "P90 Throughput": p90_throughput, "P50 Throughput": p50_throughput})
+        
+    # pd.DataFrame(throughput_df_list).to_csv("throughput.csv")
+    
 
 
 async def collect_metrics():
     """
     Collect throughputs and TTFT for all providers.
     """
-    provider_names = ProviderFactory.get_all_provider_names()
+    provider_names = ["RunPod"]
     tasks = []
     for provider_name in provider_names:
-        for model in ModelName:
+        for model in ["mistral-7b-instruct"]:
             task = asyncio.create_task(provider_handler(provider_name, model))
             tasks.append(task)
 
@@ -204,6 +223,5 @@ async def collect_metrics():
 
 
 async def collect_metrics_with_retries():
-    for _ in range(COLLECTION_RETRIES):
-        await collect_metrics()
-        asyncio.sleep(SECONDS_BETWEEN_COLLECTIONS)
+    await collect_metrics()
+    asyncio.sleep(SECONDS_BETWEEN_COLLECTIONS)

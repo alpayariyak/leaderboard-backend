@@ -3,6 +3,8 @@ import time
 import openai
 import httpx
 
+import os
+
 
 class OpenaiProvider(BaseProvider):
     """
@@ -30,9 +32,13 @@ class OpenaiProvider(BaseProvider):
         self, llm_name: str, prompt: str, max_tokens: int, client=None
     ) -> float:
         client = client or self.CLIENT
+        """"
+        Once in TRRT worker non-streaming is fixed, change this back
+        """
+        
         start = time.time()
         response = await client.chat.completions.create(
-            model=self.SUPPORTED_MODELS[llm_name],
+            model=os.getenv("MODEL_NAME"),
             messages=[
                 {
                     "role": "user",
@@ -44,6 +50,22 @@ class OpenaiProvider(BaseProvider):
         )
         latency = time.time() - start
         return response.usage.completion_tokens / latency
+        # start = time.time()
+        # stream = await client.chat.completions.create(
+        #     model=self.SUPPORTED_MODELS[llm_name],
+        #     messages=[{"role": "user", "content": prompt}],
+        #     stream=True,
+        #     max_tokens=max_tokens,
+        #     timeout=600,
+        # )
+        # async for chunk in stream:
+        #     if chunk.choices[0].delta.content is not None:
+        #         last_chunk = chunk 
+    
+        # n_tokens = last_chunk.usage["total_tokens"]
+        # return n_tokens / (time.time() - start)
+
+
 
     async def call_streaming(
         self, llm_name: str, prompt: str, max_tokens: int, client=None
